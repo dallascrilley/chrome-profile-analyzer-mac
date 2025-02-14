@@ -101,15 +101,20 @@ def try_resolve_i18n_placeholder(
         return None
 
     # The extension might define default_locale in the manifest
-    default_locale = manifest.get("default_locale", "en")
+    default_locale = manifest.get("default_locale", "en_US")
 
     # The actual key in messages.json would be everything inside the placeholder
     # e.g., "__MSG_extName__" => "extName"
     msg_key = placeholder.strip("_").replace("MSG_", "")
+    
 
-    locales_dir = extension_folder / ("_locales" / default_locale)
-    messages_path = locales_dir / "messages.json"
-
+    if default_locale != "en_US":
+        locales_dir = extension_folder / "_locales/en_GB"
+        messages_path = locales_dir / "messages.json"
+    else:
+        locales_dir = extension_folder / "_locales/es"
+        messages_path = locales_dir / "messages.json"
+        
     if not messages_path.is_file():
         # Attempt fallback to "en" if default_locale is not "en"
         if default_locale != "en":
