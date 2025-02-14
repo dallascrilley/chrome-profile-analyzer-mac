@@ -58,6 +58,11 @@ def get_extension_name(extension_version_dir: Path) -> str:
         return extension_version_dir.parent.name
 
 
+def format_size_in_mb(size_bytes: int) -> str:
+    # Convert bytes to megabytes using 1024*1024 as the conversion factor, formatted to 2 decimals.
+    return f"{size_bytes / (1024 * 1024):.2f} MB"
+
+
 def enumerate_profiles(chrome_data_dir: Path) -> List[Path]:
     """
     Return a list of all valid Chrome profile directories under 'chrome_data_dir'.
@@ -92,7 +97,7 @@ def main() -> None:
 
     print("=== Chrome Profiles (sorted by size) ===")
     for friendly_name, profile_dir, prof_size in profile_info:
-        print(f"- {friendly_name} [{profile_dir.name}] : {prof_size} bytes")
+        print(f"- {friendly_name} [{profile_dir.name}] : {format_size_in_mb(prof_size)}")
         # Within each profile, examine Extensions folder
         extensions_dir = profile_dir / "Extensions"
         if not extensions_dir.is_dir():
@@ -131,7 +136,7 @@ def main() -> None:
         # Print extension details
         print("  Extensions (sorted by size):")
         for ext_name, ext_size in extension_details:
-            print(f"    • {ext_name} : {ext_size} bytes")
+            print(f"    • {ext_name} : {format_size_in_mb(ext_size)}")
         print()
 
 if __name__ == "__main__":
