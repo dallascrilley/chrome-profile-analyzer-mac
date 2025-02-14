@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-CHROME_USER_DATA_DIR = Path("/Users/dallascrilley/Library/Application Support/Google/Chrome")
+CHROME_USER_DATA_DIR = Path(os.environ.get("CHROME_USER_DATA_DIR", Path.home() / "Library/Application Support/Google/Chrome"))
 
 
 def get_folder_size(path: Path) -> int:
