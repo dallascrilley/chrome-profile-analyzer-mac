@@ -1,339 +1,243 @@
 import os
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 ###############################################################################
 # GLOBAL CONFIG / DEBUG SWITCH
 ###############################################################################
-DEBUG = False
+DEBUG = True
 
-def debug(msg: str) -> None:
+def debug(message: str) -> None:
     """Print debug messages if DEBUG is set."""
     if DEBUG:
-        print(f"[DEBUG] {msg}")
+        print(f"[DEBUG] {message}")
 
 ###############################################################################
 # GLOBAL PATHS
 ###############################################################################
-
 CHROME_USER_DATA_DIR = Path(
     os.environ.get("CHROME_USER_DATA_DIR", Path.home() / "Library/Application Support/Google/Chrome")
 )
 LOCAL_STATE_FILE = CHROME_USER_DATA_DIR / "Local State"
 
 ###############################################################################
-# PROFILE NAME RESOLUTION
+# HELPER: GENERIC JSON LOADER
 ###############################################################################
-
-def load_local_state_map(local_state_path: Path) -> Dict[str, dict]:
-    """
-    Parse 'Local State' -> profile.info_cache -> <profile_folder>.
-    Return a dict: { "Profile 1": {...}, "Default": {...}, etc. }
-    Each value is the entire info_cache entry, e.g. {
-       "name": "...",
-       "gaia_name": "...",
-       "user_name": "...",
-       ...
-    }
-    """
-    if not local_state_path.is_file():
-        debug(f"Local State file not found: {local_state_path}")
-        return {}
-
-    try:
-        with local_state_path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        info_cache = data.get("profile", {}).get("info_cache", {})
-        return info_cache
-    except (json.JSONDecodeError, OSError) as e:
-        debug(f"Error reading Local State file: {e}")
-        return {}
-
-def load_preferences(profile_dir: Path) -> Optional[dict]:
-    """
-    Try to read and parse the Preferences JSON in a given profile dir.
-    Return the parsed dict or None on error.
-    """
-    pref_path = profile_dir / "Preferences"
-    if not pref_path.is_file():
-        debug(f"Preferences file not found in {profile_dir}")
+def load_json_file(file_path: Path) -> Optional[Any]:
+    """Return JSON data from a file, or None if file doesn't exist or fails to parse."""
+    if not file_path.is_file():
+        debug(f"JSON file not found: {file_path}")
         return None
     try:
-        with pref_path.open("r", encoding="utf-8") as f:
+        with file_path.open("r", encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as e:
-        debug(f"Error reading Preferences in {profile_dir}: {e}")
+        debug(f"Error reading JSON from {file_path}: {e}")
         return None
 
-def is_generic_person_name(name: str) -> bool:
-    """
-    Return True if the name is basically "Person X" or empty, which isn't very descriptive.
-    We'll consider 'Person 2', 'Person 1', 'Person 3' as generic placeholders.
-    """
-    if not name:
-        return True
-    lower = name.strip().lower()
-    # e.g. "person 1", "person 2", "person 12"...
-    if lower.startswith("person "):
-        # Check if the remainder is an integer
-        try:
-            int(lower.replace("person ", ""))
-            return True
-        except ValueError:
-            pass
-    return False
+###############################################################################
+# LOCAL STATE / PREFERENCES
+###############################################################################
+def load_info_cache_map(local_state_path: Path) -> Dict[str, dict]:
+    """Return profile info_cache from the 'Local State' file."""
+    data = load_json_file(local_state_path) or {}
+    return data.get("profile", {}).get("info_cache", {})
 
+def load_preferences(profile_dir: Path) -> Optional[dict]:
+    """Return Preferences JSON dict from a given profile directory."""
+    return load_json_file(profile_dir / "Preferences")
+
+###############################################################################
+# GENERIC NAME CHECK
+###############################################################################
+def is_generic_person_name(name: str) -> bool:
+    """True if name is empty or matches 'Person X' patterns."""
+    name = (name or "").strip().lower()
+    if not name or not name.startswith("person "):
+        return False
+    try:
+        # e.g. "Person 1", "Person 12" => after "person " must be int
+        int(name.replace("person ", ""))
+        return True
+    except ValueError:
+        return False
+
+###############################################################################
+# BUILD PROFILE NAMES
+###############################################################################
 def build_pretty_name_from_prefs(prefs: dict) -> Optional[str]:
     """
-    Attempt to build a user-friendly name from:
-      - prefs["profile"]["name"] if it's not generic
+    Attempt to derive a user-friendly name from Preferences:
+      - prefs["profile"]["name"] if not generic
       - or "gaia_name" / "user_name"
       - or "account_info" array
-    If everything is missing/generic, return None.
     """
     profile_section = prefs.get("profile", {})
-    # 1) Use profile->name if not generic
+
+    # 1) Check 'profile->name' if not generic
     raw_name = profile_section.get("name")
     if raw_name and not is_generic_person_name(raw_name):
-        debug(f"build_pretty_name_from_prefs: using profile->name = {raw_name}")
+        debug(f"Using profile->name = {raw_name}")
         return raw_name
 
-    # 2) Check gaia_name / user_name if present
-    gaia_name = profile_section.get("gaia_name")
-    if gaia_name and not is_generic_person_name(gaia_name):
-        debug(f"build_pretty_name_from_prefs: using gaia_name = {gaia_name}")
-        return gaia_name
+    # 2) Check gaia_name / user_name
+    for key in ("gaia_name", "user_name"):
+        val = profile_section.get(key)
+        if val and not is_generic_person_name(val):
+            debug(f"Using {key} = {val}")
+            return val
 
-    user_name = profile_section.get("user_name")
-    if user_name and not is_generic_person_name(user_name):
-        debug(f"build_pretty_name_from_prefs: using user_name = {user_name}")
-        return user_name
-
-    # 3) Look at account_info array
-    # Usually looks like:
-    # "account_info": [
-    #   {
-    #     "email": "someone@gmail.com",
-    #     "full_name": "Some Person",
-    #     ...
-    #   }
-    # ]
+    # 3) Check account_info array (often has 'email'/'full_name')
     account_info = prefs.get("account_info", [])
     if isinstance(account_info, list) and len(account_info) == 1:
         info = account_info[0]
         email = info.get("email")
         full_name = info.get("full_name")
-        # If we have at least an email, we can do something like "full_name (email)"
         if email or full_name:
             combined = ""
             if full_name and not is_generic_person_name(full_name):
                 combined = full_name
             if email:
-                combined = combined + f" ({email})" if combined else email
-            if combined:
-                debug(f"build_pretty_name_from_prefs: using account_info => {combined}")
-                return combined
+                combined = f"{combined} ({email})" if combined else email
+            return combined or None
 
-    # If we have multiple accounts, we could try more logic,
-    # but for now we just skip.
-
-    # Nothing found
     return None
 
-def build_pretty_name_from_local_state(
-    profile_dir_name: str, 
-    info_cache_map: Dict[str, dict]
-) -> Optional[str]:
+def build_pretty_name_from_local_state(profile_dir_name: str, info_cache_map: Dict[str, dict]) -> Optional[str]:
     """
-    Attempt to build a user-friendly name from local state's info_cache
-    e.g. info_cache["Profile 32"] -> { "name": "Bob", "gaia_name": "Bob Smith", ... }
+    Attempt to derive a user-friendly name from local state's info_cache:
+      - info_cache["Profile 2"]["name"] etc.
     """
-    if profile_dir_name not in info_cache_map:
-        debug(f"No info_cache entry for {profile_dir_name} in local state.")
+    details = info_cache_map.get(profile_dir_name)
+    if not details:
         return None
 
-    details = info_cache_map[profile_dir_name]
-    # Typically "name" might be "Person 2" or "Alice (alice@example.com)"
     raw_name = details.get("name") or details.get("gaia_name") or details.get("user_name")
     if raw_name and not is_generic_person_name(raw_name):
-        debug(f"build_pretty_name_from_local_state: using info_cache => {raw_name}")
+        debug(f"Using info_cache => {raw_name}")
         return raw_name
-
     return None
 
 def get_profile_name(profile_dir: Path, info_cache_map: Dict[str, dict]) -> str:
-    """
-    Attempt a multi-step approach to get a friendly name.
-      1) Preferences -> {profile->name, gaia_name, user_name, account_info}
-      2) Local State info_cache
-      3) Folder name
-    """
+    """Multi-step approach to find a friendly name (Preferences -> Local State -> folder name)."""
     prefs = load_preferences(profile_dir)
     if prefs:
         candidate = build_pretty_name_from_prefs(prefs)
         if candidate and not is_generic_person_name(candidate):
             return candidate
 
-    # Next check local state
     local_state_candidate = build_pretty_name_from_local_state(profile_dir.name, info_cache_map)
     if local_state_candidate and not is_generic_person_name(local_state_candidate):
         return local_state_candidate
 
-    # Fallback
-    debug(f"Falling back to raw folder name for {profile_dir}")
+    # Fallback to folder name
     return profile_dir.name
-
-###############################################################################
-# FILE SIZE / FORMATTING
-###############################################################################
-
-def get_folder_size(path: Path) -> int:
-    """Recursively compute the total size (in bytes) of all files in 'path'."""
-    total_size = 0
-    for root, _, files in os.walk(path):
-        for file in files:
-            file_path = Path(root) / file
-            if file_path.is_file():
-                total_size += file_path.stat().st_size
-    return total_size
-
-def format_size_in_mb(size_bytes: int) -> str:
-    """Convert bytes to MB using 1024*1024, formatted to 2 decimals."""
-    return f"{size_bytes / (1024 * 1024):.2f} MB"
 
 ###############################################################################
 # I18N PLACEHOLDER RESOLUTION
 ###############################################################################
-
 def try_resolve_i18n_placeholder(placeholder: str, version_dir: Path) -> Optional[str]:
+    """Resolve __MSG_xxx__ placeholders from manifest.json by scanning _locales."""
     if not (placeholder.startswith("__MSG_") and placeholder.endswith("__")):
-        debug(f"Placeholder doesn't match MSG pattern: {placeholder}")
         return None
 
     msg_key = placeholder.strip("_").replace("MSG_", "")
-    debug(f"Trying to resolve i18n placeholder '{placeholder}' => key '{msg_key}' in version folder: {version_dir}")
-
     locales_dir = version_dir / "_locales"
     if not locales_dir.is_dir():
-        debug(f"No _locales directory found at {locales_dir}")
         return None
 
-    def find_key_in_locales(k: str) -> Optional[str]:
+    def find_key_in_locales(key: str) -> Optional[str]:
         for locale_subdir in locales_dir.iterdir():
             if not locale_subdir.is_dir():
                 continue
-            messages_file = locale_subdir / "messages.json"
-            if not messages_file.is_file():
-                debug(f"[{locale_subdir.name}] messages.json not found.")
-                continue
-
-            try:
-                data = json.loads(messages_file.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError) as e:
-                debug(f"[{locale_subdir.name}] Error reading messages.json: {e}")
-                continue
-
-            debug(f"[{locale_subdir.name}] Checking for key '{k}' in {messages_file}")
-            if k in data:
-                msg_value = data[k].get("message")
-                debug(f"[{locale_subdir.name}] Found key '{k}' => '{msg_value}'")
-                return msg_value
-            else:
-                debug(f"[{locale_subdir.name}] Key '{k}' not found.")
-
-        debug(f"No locale folder contained the key '{k}'")
+            messages_data = load_json_file(locale_subdir / "messages.json") or {}
+            if key in messages_data:
+                return messages_data[key].get("message")
         return None
 
+    # Try direct key
     direct = find_key_in_locales(msg_key)
     if direct:
         return direct
 
+    # Try fallback: if there's an underscore, use the left side
     if "_" in msg_key:
         fallback_key = msg_key.split("_", 1)[0]
-        debug(f"No direct match for '{msg_key}', trying fallback key '{fallback_key}'")
-        fallback = find_key_in_locales(fallback_key)
-        if fallback:
-            return fallback
+        return find_key_in_locales(fallback_key)
 
-    debug(f"No i18n resolution found for '{placeholder}' in {version_dir}")
     return None
 
 ###############################################################################
 # EXTENSION NAME EXTRACTION
 ###############################################################################
-
 def get_extension_name(extension_version_dir: Path) -> str:
+    """Return a user-friendly extension name by reading manifest.json (including i18n resolution)."""
     manifest_path = extension_version_dir / "manifest.json"
     if not manifest_path.is_file():
-        debug(f"No manifest.json in {extension_version_dir}, using parent folder name.")
+        return extension_version_dir.parent.name  # fallback to parent folder name
+
+    manifest = load_json_file(manifest_path) or {}
+    raw_name = manifest.get("default_title") or manifest.get("name")
+    if not raw_name:
         return extension_version_dir.parent.name
 
-    debug(f"Reading manifest.json from {manifest_path}")
-    try:
-        with manifest_path.open("r", encoding="utf-8") as f:
-            manifest = json.load(f)
+    # Attempt i18n resolution if needed
+    if raw_name.startswith("__MSG_"):
+        resolved = try_resolve_i18n_placeholder(raw_name, extension_version_dir)
+        return resolved if resolved else raw_name
 
-        raw_name = manifest.get("default_title") or manifest.get("name")
-        debug(f"Raw extension name from manifest: {raw_name}")
-
-        if not raw_name:
-            debug("Manifest has no 'default_title' or 'name', using folder name.")
-            return extension_version_dir.parent.name
-
-        if raw_name.startswith("__MSG_"):
-            debug(f"Attempting i18n resolution for placeholder {raw_name}")
-            resolved = try_resolve_i18n_placeholder(raw_name, extension_version_dir)
-            if resolved:
-                debug(f"Resolved placeholder '{raw_name}' => '{resolved}'")
-                return resolved
-            else:
-                debug(f"Could not resolve placeholder '{raw_name}', returning placeholder.")
-        return raw_name
-
-    except (json.JSONDecodeError, OSError) as e:
-        debug(f"Error reading manifest.json: {e}")
-        return extension_version_dir.parent.name
+    return raw_name
 
 ###############################################################################
-# PROFILE ENUMERATION
+# PROFILE ENUMERATION & SIZE HELPERS
 ###############################################################################
-
 def enumerate_profiles(chrome_data_dir: Path) -> List[Path]:
+    """Return paths for all Chrome profiles in the data dir (Default + Profile X...)."""
     if not chrome_data_dir.is_dir():
         print(f"Could not find Chrome data directory at {chrome_data_dir}")
         return []
+    return [
+        p for p in chrome_data_dir.iterdir()
+        if p.is_dir() and (p.name == "Default" or p.name.startswith("Profile "))
+    ]
 
-    valid_profiles = []
-    for item in chrome_data_dir.iterdir():
-        if item.is_dir() and (item.name == "Default" or item.name.startswith("Profile ")):
-            valid_profiles.append(item)
+def get_folder_size(path: Path) -> int:
+    """Recursively compute the total size (in bytes) of all files in 'path'."""
+    total = 0
+    for root, _, files in os.walk(path):
+        for file in files:
+            file_path = Path(root) / file
+            if file_path.is_file():
+                total += file_path.stat().st_size
+    return total
 
-    return valid_profiles
+def format_size_in_mb(size_bytes: int) -> str:
+    """Convert bytes to MB (1024 * 1024) with 2 decimals."""
+    return f"{size_bytes / (1024 * 1024):.2f} MB"
 
 ###############################################################################
-# MAIN
+# MAIN EXECUTION
 ###############################################################################
-
 def main() -> None:
-    # 1) Load the entire info_cache from Local State (for potential fallback)
-    info_cache_map = load_local_state_map(LOCAL_STATE_FILE)
+    # 1) Load the local info cache map
+    info_cache_map = load_info_cache_map(LOCAL_STATE_FILE)
 
-    # 2) Enumerate profile directories
+    # 2) Enumerate all profile directories
     profiles = enumerate_profiles(CHROME_USER_DATA_DIR)
 
-    profile_info = []
+    # 3) Gather profile info (friendly name + size)
+    profile_data = []
     for profile_dir in profiles:
-        # Build a more descriptive name with our new approach
         friendly_name = get_profile_name(profile_dir, info_cache_map)
         size_bytes = get_folder_size(profile_dir)
-        profile_info.append((friendly_name, profile_dir, size_bytes))
+        profile_data.append((friendly_name, profile_dir, size_bytes))
 
-    # Sort by size descending
-    profile_info.sort(key=lambda x: x[2], reverse=True)
+    # 4) Sort profiles by size descending
+    profile_data.sort(key=lambda x: x[2], reverse=True)
 
     print("=== Chrome Profiles (sorted by size) ===")
-    for friendly_name, profile_dir, prof_size in profile_info:
+    for friendly_name, profile_dir, prof_size in profile_data:
         print(f"- {friendly_name} [{profile_dir.name}] : {format_size_in_mb(prof_size)}")
         print(f"  Profile path: {profile_dir.resolve()}\n")
 
@@ -342,39 +246,31 @@ def main() -> None:
             print("  (No Extensions directory found.)\n")
             continue
 
-        extension_details = []
+        # Summarize each extension (all version subfolders)
+        extension_info = []
         for ext_id_folder in extensions_dir.iterdir():
             if not ext_id_folder.is_dir():
                 continue
 
             total_ext_size = 0
-            ext_friendly_name: Optional[str] = None
+            ext_name_candidate: Optional[str] = None
 
-            # Summation across *all* version subfolders
-            subfolders = sorted([d for d in ext_id_folder.iterdir() if d.is_dir()])
-            for version_folder in subfolders:
+            for version_folder in sorted(d for d in ext_id_folder.iterdir() if d.is_dir()):
                 version_size = get_folder_size(version_folder)
                 total_ext_size += version_size
 
-                candidate_name = get_extension_name(version_folder)
-                # If we currently have no name or only a placeholder
-                if ext_friendly_name is None:
-                    ext_friendly_name = candidate_name
-                else:
-                    # If we still have a placeholder, but the candidate is real, overwrite
-                    if ext_friendly_name.startswith("__MSG_") and not candidate_name.startswith("__MSG_"):
-                        ext_friendly_name = candidate_name
+                name = get_extension_name(version_folder)
+                # If no name yet or if we only have a placeholder, prefer a real name
+                if ext_name_candidate is None or ext_name_candidate.startswith("__MSG_"):
+                    ext_name_candidate = name
 
-            if not ext_friendly_name:
-                ext_friendly_name = ext_id_folder.name
-
-            extension_details.append((ext_friendly_name, total_ext_size, ext_id_folder))
+            extension_info.append((ext_name_candidate or ext_id_folder.name, total_ext_size, ext_id_folder))
 
         # Sort extensions by size descending
-        extension_details.sort(key=lambda x: x[1], reverse=True)
+        extension_info.sort(key=lambda x: x[1], reverse=True)
 
         print("  Extensions (sorted by size):")
-        for ext_name, ext_size, ext_path in extension_details:
+        for ext_name, ext_size, ext_path in extension_info:
             print(f"    • {ext_name} : {format_size_in_mb(ext_size)} => {ext_path.resolve()}")
         print()
 
