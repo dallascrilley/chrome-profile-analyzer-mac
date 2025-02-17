@@ -203,7 +203,7 @@ def format_size_in_mb(size_bytes: int) -> str:
     return f"{size_bytes / (1024 * 1024):.2f} MB"
 
 ###############################################################################
-# I18N PLACEHOLDER RESOLUTION (unchanged)
+# I18N PLACEHOLDER RESOLUTION
 ###############################################################################
 
 def try_resolve_i18n_placeholder(placeholder: str, version_dir: Path) -> Optional[str]:
@@ -260,7 +260,7 @@ def try_resolve_i18n_placeholder(placeholder: str, version_dir: Path) -> Optiona
     return None
 
 ###############################################################################
-# EXTENSION NAME EXTRACTION (unchanged except for updated placeholders logic)
+# EXTENSION NAME EXTRACTION
 ###############################################################################
 
 def get_extension_name(extension_version_dir: Path) -> str:
@@ -296,7 +296,7 @@ def get_extension_name(extension_version_dir: Path) -> str:
         return extension_version_dir.parent.name
 
 ###############################################################################
-# PROFILE ENUMERATION (unchanged)
+# PROFILE ENUMERATION
 ###############################################################################
 
 def enumerate_profiles(chrome_data_dir: Path) -> List[Path]:
