@@ -1,39 +1,94 @@
+#!/usr/bin/env python3
 import os
 import json
+import csv
+import logging
+import argparse
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
+
+try:
+    import colorama
+    colorama.init()  # Initialize colorama for Windows support
+except ImportError:
+    # If colorama not installed, we'll just use raw ANSI codes below.
+    pass
 
 ###############################################################################
-# GLOBAL CONFIG / DEBUG SWITCH
+# GLOBAL DEFAULT PATHS
 ###############################################################################
-DEBUG = True
-
-def debug(message: str) -> None:
-    """Print debug messages if DEBUG is set."""
-    if DEBUG:
-        print(f"[DEBUG] {message}")
+DEFAULT_CHROME_USER_DATA_DIR = Path.home() / "Library/Application Support/Google/Chrome"
+LOCAL_STATE_FILENAME = "Local State"
 
 ###############################################################################
-# GLOBAL PATHS
+# ARGUMENT PARSING
 ###############################################################################
-CHROME_USER_DATA_DIR = Path(
-    os.environ.get("CHROME_USER_DATA_DIR", Path.home() / "Library/Application Support/Google/Chrome")
-)
-LOCAL_STATE_FILE = CHROME_USER_DATA_DIR / "Local State"
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="List Chrome Profiles and Extension sizes with optional JSON/CSV export."
+    )
+    parser.add_argument(
+        "--chrome-data-dir",
+        type=str,
+        default=str(DEFAULT_CHROME_USER_DATA_DIR),
+        help="Path to the Chrome User Data directory (default on macOS)."
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging (overrides --log-level)."
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        help="Set logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)."
+    )
+    parser.add_argument(
+        "--min-size-mb",
+        type=float,
+        default=50.0,
+        help="Minimum size threshold in MB for displaying profiles/extensions. Default=50.0"
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output data in JSON format instead of human-readable text."
+    )
+    parser.add_argument(
+        "--csv",
+        action="store_true",
+        help="Output data in CSV format instead of human-readable text."
+    )
+    return parser.parse_args()
 
 ###############################################################################
-# HELPER: GENERIC JSON LOADER
+# LOGGING SETUP
+###############################################################################
+def setup_logging(args: argparse.Namespace) -> None:
+    # If --debug is present, force DEBUG level
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG)
+        return
+
+    # Otherwise, respect --log-level
+    log_level_str = args.log_level.upper()
+    numeric_level = getattr(logging, log_level_str, logging.INFO)
+    logging.basicConfig(level=numeric_level)
+
+###############################################################################
+# FILE & JSON LOADING HELPERS
 ###############################################################################
 def load_json_file(file_path: Path) -> Optional[Any]:
     """Return JSON data from a file, or None if file doesn't exist or fails to parse."""
     if not file_path.is_file():
-        debug(f"JSON file not found: {file_path}")
+        logging.debug(f"JSON file not found: {file_path}")
         return None
     try:
         with file_path.open("r", encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as e:
-        debug(f"Error reading JSON from {file_path}: {e}")
+        logging.debug(f"Error reading JSON from {file_path}: {e}")
         return None
 
 ###############################################################################
@@ -57,35 +112,34 @@ def is_generic_person_name(name: str) -> bool:
     if not name or not name.startswith("person "):
         return False
     try:
-        # e.g. "Person 1", "Person 12" => after "person " must be int
-        int(name.replace("person ", ""))
+        int(name.replace("person ", ""))  # e.g. "Person 1"
         return True
     except ValueError:
         return False
 
 ###############################################################################
-# BUILD PROFILE NAMES
+# PROFILE NAME DERIVATION
 ###############################################################################
 def build_pretty_name_from_prefs(prefs: dict) -> Optional[str]:
     """
     Attempt to derive a user-friendly name from Preferences:
       - prefs["profile"]["name"] if not generic
       - or "gaia_name" / "user_name"
-      - or "account_info" array
+      - or from "account_info"
     """
     profile_section = prefs.get("profile", {})
 
     # 1) Check 'profile->name' if not generic
     raw_name = profile_section.get("name")
     if raw_name and not is_generic_person_name(raw_name):
-        debug(f"Using profile->name = {raw_name}")
+        logging.debug(f"Using profile->name = {raw_name}")
         return raw_name
 
     # 2) Check gaia_name / user_name
     for key in ("gaia_name", "user_name"):
         val = profile_section.get(key)
         if val and not is_generic_person_name(val):
-            debug(f"Using {key} = {val}")
+            logging.debug(f"Using {key} = {val}")
             return val
 
     # 3) Check account_info array (often has 'email'/'full_name')
@@ -115,7 +169,7 @@ def build_pretty_name_from_local_state(profile_dir_name: str, info_cache_map: Di
 
     raw_name = details.get("name") or details.get("gaia_name") or details.get("user_name")
     if raw_name and not is_generic_person_name(raw_name):
-        debug(f"Using info_cache => {raw_name}")
+        logging.debug(f"Using info_cache => {raw_name}")
         return raw_name
     return None
 
@@ -190,12 +244,12 @@ def get_extension_name(extension_version_dir: Path) -> str:
     return raw_name
 
 ###############################################################################
-# PROFILE ENUMERATION & SIZE HELPERS
+# SIZE / ENUMERATION HELPERS
 ###############################################################################
 def enumerate_profiles(chrome_data_dir: Path) -> List[Path]:
     """Return paths for all Chrome profiles in the data dir (Default + Profile X...)."""
     if not chrome_data_dir.is_dir():
-        print(f"Could not find Chrome data directory at {chrome_data_dir}")
+        logging.warning(f"Could not find Chrome data directory at {chrome_data_dir}")
         return []
     return [
         p for p in chrome_data_dir.iterdir()
@@ -212,67 +266,233 @@ def get_folder_size(path: Path) -> int:
                 total += file_path.stat().st_size
     return total
 
-def format_size_in_mb(size_bytes: int) -> str:
-    """Convert bytes to MB (1024 * 1024) with 2 decimals."""
-    return f"{size_bytes / (1024 * 1024):.2f} MB"
+def format_size_in_mb(size_bytes: int) -> float:
+    """Convert bytes to MB (1024 * 1024)."""
+    return size_bytes / (1024 * 1024)
 
 ###############################################################################
-# MAIN EXECUTION
+# COLORING HELPER
 ###############################################################################
-def main() -> None:
-    # 1) Load the local info cache map
-    info_cache_map = load_info_cache_map(LOCAL_STATE_FILE)
+def color_if_large(size_mb: float, text: str) -> str:
+    """
+    If size_mb > 1 GB (1024 MB), color text in red.
+    Adjust threshold or coloring as needed.
+    """
+    if size_mb > 1024.0:  # 1GB
+        return f"\033[91m{text}\033[0m"  # Red
+    return text
 
-    # 2) Enumerate all profile directories
-    profiles = enumerate_profiles(CHROME_USER_DATA_DIR)
+###############################################################################
+# MAIN DATA GATHERING
+###############################################################################
+def gather_profiles_and_extensions(
+    chrome_data_dir: Path,
+    min_size_mb: float
+) -> Tuple[List[dict], List[dict]]:
+    """
+    Enumerate profiles in chrome_data_dir, collect their sizes,
+    and gather extension info. Skip details if below min_size_mb.
+    
+    Returns:
+      (profile_list, extension_list) 
+      where profile_list is a list of dict with:
+        {
+          "profile_name": str,
+          "profile_dir": str,
+          "profile_size_bytes": int,
+          "extensions": [ ... ]
+        }
+      and extension_list is a flattened list of all extensions for global comparisons.
+    """
+    local_state_file = chrome_data_dir / LOCAL_STATE_FILENAME
+    info_cache_map = load_info_cache_map(local_state_file)
 
-    # 3) Gather profile info (friendly name + size)
-    profile_data = []
-    for profile_dir in profiles:
-        friendly_name = get_profile_name(profile_dir, info_cache_map)
-        size_bytes = get_folder_size(profile_dir)
-        profile_data.append((friendly_name, profile_dir, size_bytes))
+    profiles_paths = enumerate_profiles(chrome_data_dir)
+    result_profiles = []
+    all_extensions = []
 
-    # 4) Sort profiles by size descending
-    profile_data.sort(key=lambda x: x[2], reverse=True)
+    for profile_dir in profiles_paths:
+        profile_name = get_profile_name(profile_dir, info_cache_map)
+        prof_size_bytes = get_folder_size(profile_dir)
+        prof_size_mb = format_size_in_mb(prof_size_bytes)
 
-    print("=== Chrome Profiles (sorted by size) ===")
-    for friendly_name, profile_dir, prof_size in profile_data:
-        print(f"- {friendly_name} [{profile_dir.name}] : {format_size_in_mb(prof_size)}")
-        print(f"  Profile path: {profile_dir.resolve()}\n")
+        # Collect extension info
+        exts_dir = profile_dir / "Extensions"
+        extensions_data = []
+        if exts_dir.is_dir():
+            for ext_id_folder in exts_dir.iterdir():
+                if not ext_id_folder.is_dir():
+                    continue
 
-        extensions_dir = profile_dir / "Extensions"
-        if not extensions_dir.is_dir():
-            print("  (No Extensions directory found.)\n")
+                total_ext_size = 0
+                ext_name_candidate: Optional[str] = None
+
+                # Sum all version folders
+                for version_folder in sorted([d for d in ext_id_folder.iterdir() if d.is_dir()]):
+                    version_size = get_folder_size(version_folder)
+                    total_ext_size += version_size
+                    nm = get_extension_name(version_folder)
+                    # If no name yet or if it's a placeholder, prefer a real name
+                    if ext_name_candidate is None or ext_name_candidate.startswith("__MSG_"):
+                        ext_name_candidate = nm
+
+                ext_name = ext_name_candidate or ext_id_folder.name
+                ext_size_bytes = total_ext_size
+                ext_size_mb = format_size_in_mb(ext_size_bytes)
+
+                # Skip extension if below threshold
+                if ext_size_mb < min_size_mb:
+                    continue
+
+                extension_dict = {
+                    "extension_name": ext_name,
+                    "extension_dir": str(ext_id_folder.resolve()),
+                    "extension_size_bytes": ext_size_bytes,
+                    "extension_size_mb": ext_size_mb,
+                    "profile_name": profile_name,
+                }
+                extensions_data.append(extension_dict)
+                all_extensions.append(extension_dict)
+
+        # Skip profile if below threshold
+        if prof_size_mb < min_size_mb:
             continue
 
-        # Summarize each extension (all version subfolders)
-        extension_info = []
-        for ext_id_folder in extensions_dir.iterdir():
-            if not ext_id_folder.is_dir():
-                continue
+        profile_dict = {
+            "profile_name": profile_name,
+            "profile_dir": str(profile_dir.resolve()),
+            "profile_size_bytes": prof_size_bytes,
+            "profile_size_mb": prof_size_mb,
+            "extensions": extensions_data,
+        }
+        result_profiles.append(profile_dict)
 
-            total_ext_size = 0
-            ext_name_candidate: Optional[str] = None
+    return result_profiles, all_extensions
 
-            for version_folder in sorted(d for d in ext_id_folder.iterdir() if d.is_dir()):
-                version_size = get_folder_size(version_folder)
-                total_ext_size += version_size
+###############################################################################
+# OUTPUT FORMATTING (TEXT, JSON, CSV)
+###############################################################################
+def print_human_readable(
+    profiles: List[dict],
+    all_extensions: List[dict]
+) -> None:
+    """
+    Print profiles and extensions in a human-readable text format.
+    Also prints summary: total profiles, total usage, top 5 largest extensions.
+    """
+    if not profiles:
+        print("No profiles found or none above the specified threshold.")
+        return
 
-                name = get_extension_name(version_folder)
-                # If no name yet or if we only have a placeholder, prefer a real name
-                if ext_name_candidate is None or ext_name_candidate.startswith("__MSG_"):
-                    ext_name_candidate = name
+    # Sort profiles by size descending
+    profiles_sorted = sorted(
+        profiles,
+        key=lambda x: x["profile_size_bytes"],
+        reverse=True
+    )
 
-            extension_info.append((ext_name_candidate or ext_id_folder.name, total_ext_size, ext_id_folder))
+    print("\n=== Chrome Profiles (sorted by size) ===")
+    for prof in profiles_sorted:
+        prof_mb_str = f"{prof['profile_size_mb']:.2f} MB"
+        colored_prof_mb_str = color_if_large(prof["profile_size_mb"], prof_mb_str)
+        print(f"- {prof['profile_name']} [{prof['profile_dir']}] : {colored_prof_mb_str}")
 
         # Sort extensions by size descending
-        extension_info.sort(key=lambda x: x[1], reverse=True)
+        extensions_sorted = sorted(
+            prof["extensions"],
+            key=lambda x: x["extension_size_bytes"],
+            reverse=True
+        )
+        if not extensions_sorted:
+            print("  (No Extensions or all under threshold)\n")
+            continue
 
         print("  Extensions (sorted by size):")
-        for ext_name, ext_size, ext_path in extension_info:
-            print(f"    • {ext_name} : {format_size_in_mb(ext_size)} => {ext_path.resolve()}")
+        for ext in extensions_sorted:
+            ext_mb_str = f"{ext['extension_size_mb']:.2f} MB"
+            colored_ext_mb_str = color_if_large(ext["extension_size_mb"], ext_mb_str)
+            print(f"    • {ext['extension_name']}: {colored_ext_mb_str} => {ext['extension_dir']}")
         print()
+
+    # Summaries
+    total_profiles = len(profiles)
+    total_usage_bytes = sum(p["profile_size_bytes"] for p in profiles)
+    total_usage_mb = total_usage_bytes / (1024 * 1024)
+    print(f"Total profiles displayed: {total_profiles}")
+    print(f"Total disk usage (above threshold): {total_usage_mb:.2f} MB")
+
+    if all_extensions:
+        # Sort globally for top 5
+        sorted_extensions = sorted(all_extensions, key=lambda x: x["extension_size_bytes"], reverse=True)
+        top_5_ext = sorted_extensions[:5]
+        print("\nTop 5 Largest Extensions (global):")
+        for ext in top_5_ext:
+            ext_mb_str = f"{ext['extension_size_mb']:.2f} MB"
+            colored_ext_mb_str = color_if_large(ext["extension_size_mb"], ext_mb_str)
+            print(f"  • {ext['extension_name']}: {colored_ext_mb_str} (Profile: {ext['profile_name']})")
+    print()
+
+def output_json(profiles: List[dict]) -> None:
+    """Dump profiles data as JSON."""
+    print(json.dumps(profiles, indent=2))
+
+def output_csv(profiles: List[dict]) -> None:
+    """
+    Dump CSV rows. 
+    One row per extension. If a profile has no extensions, we still output one row with just profile info.
+    """
+    csv_writer = csv.writer(os.sys.stdout)
+    # Write header
+    csv_writer.writerow([
+        "profile_name", "profile_dir", "profile_size_mb",
+        "extension_name", "extension_dir", "extension_size_mb"
+    ])
+
+    for prof in profiles:
+        # If no extensions, output a row with empty extension fields
+        if not prof["extensions"]:
+            csv_writer.writerow([
+                prof["profile_name"],
+                prof["profile_dir"],
+                f"{prof['profile_size_mb']:.2f}",
+                "",  # ext name
+                "",  # ext dir
+                ""   # ext size
+            ])
+        else:
+            for ext in prof["extensions"]:
+                csv_writer.writerow([
+                    prof["profile_name"],
+                    prof["profile_dir"],
+                    f"{prof['profile_size_mb']:.2f}",
+                    ext["extension_name"],
+                    ext["extension_dir"],
+                    f"{ext['extension_size_mb']:.2f}",
+                ])
+
+###############################################################################
+# MAIN
+###############################################################################
+def main() -> None:
+    args = parse_args()
+    setup_logging(args)
+
+    # Gather data
+    chrome_data_dir = Path(args.chrome_data_dir)
+    min_size_mb = args.min_size_mb
+
+    profiles_data, all_extensions_data = gather_profiles_and_extensions(
+        chrome_data_dir=chrome_data_dir,
+        min_size_mb=min_size_mb
+    )
+
+    # Output
+    if args.json:
+        output_json(profiles_data)
+    elif args.csv:
+        output_csv(profiles_data)
+    else:
+        print_human_readable(profiles_data, all_extensions_data)
 
 if __name__ == "__main__":
     main()
